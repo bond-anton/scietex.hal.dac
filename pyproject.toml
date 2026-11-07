@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scietex.hal.dac"
+dynamic = ["version"]
+description = "Digital-to-analog converters and digital potentiometers"
+authors = [{ name = "Anton Bondarenko", email = "bond.anton@gmail.com" }]
+license = { file = "LICENSE" }
+readme = "README.md"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+requires-python = ">=3.10"
+dependencies = ["BDPotentiometer >= 0.4.0, < 1.0.0", "scietex.hal.spi >= 0.1.0, < 1.0.0"]
+
+[project.urls]
+"Homepage" = "https://github.com/bond-anton/scietex.hal.dac"
+"Bug Tracker" = "https://github.com/bond-anton/scietex.hal.dac/issues"
+
+[project.optional-dependencies]
+spi = ["scietex.hal.spi[spi]"]
+gpiozero = ["scietex.hal.spi[gpiozero]"]
+dev = ["tox>=4.46.0"]
+test = ["pytest"]
+lint = ["ruff==0.17.4", "ty==0.0.99"]
+
+[tool.setuptools.dynamic]
+version = { attr = "scietex.hal.dac.version.__version__" }
+
+[tool.setuptools.package-data]
+"scietex.hal.dac" = ["py.typed"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4","E7","E9","F","W","I","B","C4","SIM","UP","PLC0415","PLR0913","PLR0917"]
+ignore = ["E501","SLF001"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLC0415"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+docstring-code-format = false
+
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.analysis]
+replace-imports-with-any = ["spidev.**", "gpiozero.**"]
