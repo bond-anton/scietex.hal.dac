@@ -3,10 +3,13 @@
 .venv
 .pytest_cache
 .mypy_cache
-src/scietex.hal.dac.egg-info
+.ruff_cache
+.ty_cache
+*.egg-info
 .coverage
 htmlcov
 uv.lock
 __pycache__
 build
+dist
 .vscode
