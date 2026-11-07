@@ -11,3 +11,11 @@ class DACReferenceError(DACError, ValueError):
 
 class DACCodeError(DACError, ValueError):
     """Raised when a raw code falls outside `0..max_code`."""
+
+
+class DACReadbackError(DACError, RuntimeError):
+    """Raised when a register read is requested from a write-only device."""
+
+
+class DACStrobeError(DACError, RuntimeError):
+    """Raised when a strobed device is used without a load strobe."""

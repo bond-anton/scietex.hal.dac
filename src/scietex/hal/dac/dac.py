@@ -22,6 +22,12 @@ class DAC:
     None the scaled `output` of every channel is None, because the library will
     not guess a full scale.
 
+    A device that cannot report its registers back sets `_READABLE` to False;
+    its channels then serve the code cached from the last write instead of
+    asking the bus. A device with an internal full scale sets
+    `_FIXED_REFERENCE` to it, and then `reference` can only be that value or
+    None.
+
     The object can be used as a context manager; leaving the block closes the
     backend.
     """
@@ -29,6 +35,11 @@ class DAC:
     _CHANNELS: int = 0
     _RESOLUTION: int = 8
     _CHANNEL_CLASS: type[DACChannel] = DACChannel
+    _READABLE: bool = True
+    """False on a device that cannot report its own register contents."""
+
+    _FIXED_REFERENCE: float | None = None
+    """Full scale fixed by the device, in its own unit, or None."""
 
     def __init__(
         self,
@@ -52,15 +63,16 @@ class DAC:
         :param log_level: Logging level such as `logging.DEBUG`; defaults to
             `logging.ERROR`.
         :raises TypeError: If `reference` or `label` has the wrong type.
-        :raises ValueError: If `reference` is not positive, `label` is empty,
-            or `channel_count` is outside `1..channels`.
+        :raises ValueError: If `reference` is not positive, conflicts with a
+            fixed full scale, `label` is empty, or `channel_count` is outside
+            `1..channels`.
         """
         # Duck-typed on purpose: the base class only probes attributes such as
         # `transport` and calls `close()`, and a device family supplies the
         # concrete backend.
         self._backend: Any = backend
         self._closed = False
-        self.reference = reference
+        self._reference = self._check_fixed_reference(check_reference(reference))
         self.label = None if label is None else check_label(label)
         self.logger = get_logger(self.label or type(self).__name__, log_level)
         count = (
@@ -86,9 +98,15 @@ class DAC:
 
         :param reference: Positive full scale, or None (float | None).
         :raises TypeError: If `reference` is not a real number, or is a `bool`.
-        :raises ValueError: If `reference` is zero, negative, infinite, or `NaN`.
+        :raises ValueError: If `reference` is zero, negative, infinite, or
+            `NaN`, or conflicts with a fixed full scale.
         """
-        self._reference = check_reference(reference)
+        self._reference = self._check_fixed_reference(check_reference(reference))
+
+    @property
+    def readable(self) -> bool:
+        """True when the device can report its own register contents."""
+        return self._READABLE
 
     @property
     def v_ref(self) -> float | None:
@@ -126,7 +144,9 @@ class DAC:
         """
         Read every channel.
 
-        No value is cached: each element is a separate bus transaction.
+        A readable channel is read live: each element is a separate bus
+        transaction and nothing is cached. On a write-only device every element
+        is the cached code, so no bus traffic is issued.
 
         :return: Raw codes in channel index order (tuple of int).
         """
@@ -137,7 +157,8 @@ class DAC:
         Write one raw code per channel.
 
         The whole sequence is validated before the first bus transaction, so a
-        rejected element cannot leave the device partially updated.
+        rejected element cannot leave the device partially updated. A write-only
+        device performs one transfer per channel and reads nothing back.
 
         :param values: One code per channel (Sequence of int).
         :return: Codes that were written, in channel index order.
@@ -190,6 +211,26 @@ class DAC:
         :raises NotImplementedError: Always, the base class has no codec.
         """
         raise NotImplementedError
+
+    def _check_fixed_reference(self, reference: float | None) -> float | None:
+        """
+        Resolve a reference against a full scale fixed by the device.
+
+        :param reference: Validated reference, or None (float | None).
+        :return: The reference itself, or the fixed full scale when the device
+            has one.
+        :raises ValueError: If a reference is given that is not the fixed
+            full scale.
+        """
+        fixed = self._FIXED_REFERENCE
+        if fixed is None:
+            return reference
+        if reference is not None and reference != fixed:
+            raise ValueError(
+                f"{type(self).__name__} has a fixed full scale of {fixed}; "
+                f"got reference={reference!r}"
+            )
+        return fixed
 
     @property
     def transport(self) -> Any:

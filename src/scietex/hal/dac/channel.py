@@ -1,16 +1,18 @@
 """Channel objects for digital-to-analog converters."""
 
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from .__helpers import (
+    check_bool,
+    check_choice,
     check_grounded,
     check_integer,
     check_number,
     check_reference,
     clamp,
 )
-from .errors import DACCodeError, DACReferenceError
+from .errors import DACCodeError, DACReadbackError, DACReferenceError
 
 if TYPE_CHECKING:
     from .dac import DAC
@@ -31,10 +33,11 @@ class DACChannel:
     """
     One output of a `DAC` device.
 
-    The channel keeps no register state: reading `value` asks the device every
-    time, and the setter writes the code through to it. `output` scales that
-    code by the reference and stays None while no reference is configured,
-    because the library will not guess a full scale.
+    The channel keeps the code from the last successful write. On a readable
+    device `value` still asks the device every time; on a write-only device it
+    returns that cached code, since there is no register to read back. `output`
+    scales the code by the reference and stays None while no reference is
+    configured, because the library will not guess a full scale.
 
     A device may scale each channel differently, so `reference_override` wins
     over the device reference for this channel only.
@@ -47,6 +50,9 @@ class DACChannel:
         self.index = check_integer(index)
         self._reference_override: float | None = None
         self._reported_code: int | None = None
+        # Every in-scope part powers up at zero scale, so "no write yet" and
+        # "the register holds 0" are the same state.
+        self._shadow_code: int = 0
 
     @property
     def max_code(self) -> int:
@@ -84,12 +90,22 @@ class DACChannel:
         return self._dac.reference
 
     @property
+    def readable(self) -> bool:
+        """True when the device can report its own register contents."""
+        return self._dac.readable
+
+    @property
     def value(self) -> int:
         """
-        Raw code of the output, read from the device.
+        Raw code of the output.
+
+        A readable device is asked every time; a write-only device returns the
+        code cached from the last successful write.
 
         :return: Code in `0..max_code` (int).
         """
+        if not self._dac.readable:
+            return self._shadow_code
         return self._read_code()
 
     @value.setter
@@ -103,6 +119,16 @@ class DACChannel:
         :raises DACCodeError: If `code` is outside `0..max_code`.
         """
         self._reported_code = self._write_code(self._check_code(code))
+        self._shadow_code = self._reported_code
+
+    def readback(self) -> int:
+        """Read the register over the bus; raises when the part is write-only."""
+        if not self._dac.readable:
+            raise DACReadbackError(
+                f"Channel {self.index} belongs to a write-only device; "
+                "use .value for the cached code"
+            )
+        return self._read_code()
 
     @property
     def output(self) -> float | None:
@@ -294,3 +320,119 @@ class DividerChannel(VoltageChannel):
         if self._grounded == "B":
             return int(round(fraction * self.max_code))
         return int(round((1 - fraction) * self.max_code))
+
+
+class GainChannel:
+    """
+    Voltage channel whose output span has a 1x/2x gain bit.
+
+    A building block, not for direct instantiation: mix it in ahead of a
+    channel class and it passes construction on through `super()`.
+    `reference_override` (which `v_ref` writes) is the unscaled reference,
+    while `reference` is the effective full scale after gain, so changing gain
+    moves `reference`, `output`, and the clamp bound but never the code.
+    """
+
+    _GAINS: ClassVar[tuple[int, ...]] = (1, 2)
+    """Gain factors the chip can select with its gain bit."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Pass construction on and start at the power-on gain."""
+        super().__init__(*args, **kwargs)
+        # The gain bit powers up at 0, which selects 2x.
+        self._gain = 2
+
+    @property
+    def gain(self) -> int:
+        """Selected gain factor."""
+        return self._gain
+
+    @gain.setter
+    def gain(self, gain: int) -> None:
+        """
+        Select the gain factor without touching the bus.
+
+        The bit only reaches the chip on the next code write, so the code and
+        the cached shadow stay as they are.
+
+        :param gain: Gain factor, one of `_GAINS` (int).
+        :raises TypeError: If `gain` is not an integer number, or is a `bool`.
+        :raises ValueError: If `gain` is not one of the supported factors.
+        """
+        self._gain = check_choice(gain, self._GAINS, "gain")
+
+    @property
+    def reference(self) -> float | None:
+        """Effective full scale: the unscaled reference times the gain."""
+        # The next class in the bases is the channel this mixin augments.
+        base = cast(DACChannel, super()).reference
+        return None if base is None else base * self._gain
+
+
+class BufferedChannel:
+    """
+    Voltage channel whose reference input can be buffered.
+
+    A building block, not for direct instantiation: mix it in ahead of a
+    channel class and it passes construction on through `super()`. It leaves
+    the span rule alone: `reference_override` (and `v_ref`) stays the unscaled
+    reference and `reference` the effective full scale after any gain.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Pass construction on and start with the buffer disabled."""
+        super().__init__(*args, **kwargs)
+        self._buffered = False
+
+    @property
+    def buffered(self) -> bool:
+        """True when the chip buffers its reference input."""
+        return self._buffered
+
+    @buffered.setter
+    def buffered(self, buffered: bool) -> None:
+        """
+        Switch the reference buffer, a chip-side bit the code ignores.
+
+        :param buffered: Buffering state (bool).
+        :raises TypeError: If `buffered` is not a bool.
+        """
+        self._buffered = check_bool(buffered)
+
+
+class PowerDownChannel:
+    """
+    Voltage channel with a power-down field.
+
+    A building block, not for direct instantiation: mix it in ahead of a
+    channel class and it passes construction on through `super()`. It leaves
+    the span rule alone: `reference_override` (and `v_ref`) stays the unscaled
+    reference and `reference` the effective full scale after any gain.
+    """
+
+    _POWER_DOWN_CODES: ClassVar[frozenset[int]] = frozenset({0, 1, 2, 3})
+    """Power-down modes the chip accepts; a single SHDN bit uses `{0, 1}`."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Pass construction on and start in normal operation."""
+        super().__init__(*args, **kwargs)
+        self._power_down = 0
+
+    @property
+    def power_down(self) -> int:
+        """Power-down mode, 0 meaning normal operation."""
+        return self._power_down
+
+    @power_down.setter
+    def power_down(self, power_down: int) -> None:
+        """
+        Select the power-down mode without touching the bus.
+
+        :param power_down: Mode, one of `_POWER_DOWN_CODES` (int).
+        :raises TypeError: If `power_down` is not an integer number, or is a
+            `bool`.
+        :raises ValueError: If `power_down` is not one of the supported modes.
+        """
+        self._power_down = check_choice(
+            power_down, self._POWER_DOWN_CODES, "power_down"
+        )

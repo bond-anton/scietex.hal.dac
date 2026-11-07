@@ -1,5 +1,6 @@
 """Shared helpers for the DAC tests."""
 
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -36,15 +37,19 @@ class RecordingTransport:
         self,
         responses: Sequence[Sequence[int]] | None = None,
         default: Sequence[int] = (),
+        *,
+        log: list[str] | None = None,
     ) -> None:
         self.responses = [list(response) for response in responses or []]
         self.default = list(default)
         self.requests: list[list[int]] = []
         self.close_calls = 0
         self.closed = False
+        self.log: list[str] = [] if log is None else log
 
     def transfer(self, data: Sequence[int]) -> list[int]:
         """Record `data` and return the next scripted response, else the default."""
+        self.log.append("transfer")
         self.requests.append(list(data))
         if self.responses:
             return self.responses.pop(0)
@@ -52,6 +57,7 @@ class RecordingTransport:
 
     def close(self) -> None:
         """Count the call and mark the transport closed."""
+        self.log.append("transport-close")
         self.close_calls += 1
         self.closed = True
 
@@ -61,6 +67,30 @@ class RecordingTransport:
             f"{type(self).__name__}(requests={len(self.requests)}, "
             f"closed={self.closed})"
         )
+
+
+class FakeStrobe:
+    """Load-strobe stand-in that records pulses in a shared ordering log."""
+
+    def __init__(self, *, log: list[str] | None = None) -> None:
+        self.pulse_calls: list[float] = []
+        self.closed = False
+        self.close_calls = 0
+        self.log: list[str] = [] if log is None else log
+        self.raise_on_close = False
+
+    def pulse(self) -> None:
+        """Record one pulse at its monotonic timestamp."""
+        self.pulse_calls.append(time.monotonic())
+        self.log.append("pulse")
+
+    def close(self) -> None:
+        """Count the call and mark the strobe closed unless it is set to fail."""
+        self.close_calls += 1
+        self.log.append("strobe-close")
+        if self.raise_on_close:
+            raise RuntimeError("strobe close failed")
+        self.closed = True
 
 
 class MemoryBackend:

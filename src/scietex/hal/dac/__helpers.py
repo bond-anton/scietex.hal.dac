@@ -6,6 +6,7 @@ its value second, raising `ValueError` for infinities, `NaN`, and values outside
 the requested range.
 """
 
+from collections.abc import Collection
 from math import isnan
 from numbers import Integral, Real
 
@@ -55,6 +56,33 @@ def check_integer(num: float | int | Real) -> int:
     if isinstance(num, float) and not num.is_integer():
         raise ValueError(f"Expected an integer number, got {num}")
     return int(num)
+
+
+def check_choice(num: float | int | Real, choices: Collection[int], name: str) -> int:
+    """
+    Check that `num` is one of the integer values in `choices`.
+
+    The kind of value is checked before its membership: a `bool`, a string, or
+    a fractional float is a caller mistake and raises `TypeError`, while a
+    well-typed number outside the set raises `ValueError`. Integral floats are
+    accepted and converted, like every other integer field in the package.
+
+    :param num: Candidate value.
+    :param choices: Values the field accepts.
+    :param name: Field name used in the error message.
+    :return: `num` as int.
+    :raises TypeError: If `num` is not an integer number, or is a `bool`.
+    :raises ValueError: If `num` is infinite or `NaN`, or is not one of
+        `choices`.
+    """
+    checked = check_number(num)
+    if isinstance(checked, float) and not checked.is_integer():
+        raise TypeError(f"Expected an integer {name}, got {num!r}")
+    value = int(checked)
+    if value not in choices:
+        allowed = ", ".join(str(choice) for choice in sorted(choices))
+        raise ValueError(f"Expected {name} to be one of {allowed}, got {value}")
+    return value
 
 
 def check_bool(value: bool) -> bool:
