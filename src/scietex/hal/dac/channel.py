@@ -36,11 +36,13 @@ class DACChannel:
     The channel keeps the code from the last successful write. On a readable
     device `value` still asks the device every time; on a write-only device it
     returns that cached code, since there is no register to read back. `output`
-    scales the code by the reference and stays None while no reference is
-    configured, because the library will not guess a full scale.
+    maps the code onto the span from `lower_bound` to the reference and stays
+    None while no reference is configured, because the library will not guess a
+    full scale.
 
     A device may scale each channel differently, so `reference_override` wins
-    over the device reference for this channel only.
+    over the device reference for this channel only. Both bound the top of the
+    span; neither sets the floor.
     """
 
     UNIT: ClassVar[DACUnit] = DACUnit.VOLTAGE
@@ -49,6 +51,7 @@ class DACChannel:
         self._dac = dac
         self.index = check_integer(index)
         self._reference_override: float | None = None
+        self._lower_bound = float(getattr(dac, "_LOWER_BOUND", 0.0))
         self._reported_code: int | None = None
         # Every in-scope part powers up at zero scale, so "no write yet" and
         # "the register holds 0" are the same state.
@@ -66,15 +69,18 @@ class DACChannel:
 
     @property
     def reference_override(self) -> float | None:
-        """Per-channel reference that wins over the device reference."""
+        """Per-channel upper bound that wins over the device reference."""
         return self._reference_override
 
     @reference_override.setter
     def reference_override(self, reference: float | None) -> None:
         """
-        Set a per-channel reference, or clear it with None.
+        Set a per-channel upper bound, or clear it with None.
 
-        :param reference: Positive reference, or None to fall back to the
+        The override is the top of the span, not its width: the span still
+        starts at `lower_bound`.
+
+        :param reference: Positive upper bound, or None to fall back to the
             device reference (float | None).
         :raises TypeError: If `reference` is not a real number, or is a `bool`.
         :raises ValueError: If `reference` is zero, negative, infinite, or `NaN`.
@@ -83,11 +89,32 @@ class DACChannel:
 
     @property
     def reference(self) -> float | None:
-        """Reference this channel scales by: the override, else the device's."""
+        """Upper bound the top code maps to: the override, else the device's."""
         override = self.reference_override
         if override is not None:
             return override
         return self._dac.reference
+
+    @property
+    def lower_bound(self) -> float:
+        """Output floor this channel maps code 0 to, in the channel unit."""
+        return self._lower_bound
+
+    @lower_bound.setter
+    def lower_bound(self, lower_bound: float) -> None:
+        """
+        Set the output floor that code 0 maps to.
+
+        The floor may be negative. Whether it stays below the reference is
+        checked when an output is written, because the reference can change
+        afterwards.
+
+        :param lower_bound: Output floor in the channel unit (float).
+        :raises TypeError: If `lower_bound` is not a real number, or is a
+            `bool`.
+        :raises ValueError: If `lower_bound` is infinite or `NaN`.
+        """
+        self._lower_bound = float(check_number(lower_bound))
 
     @property
     def readable(self) -> bool:
@@ -133,33 +160,37 @@ class DACChannel:
     @property
     def output(self) -> float | None:
         """
-        Canonical output scaled by the channel reference.
+        Canonical output over the span from the floor to the reference.
 
         Units follow the channel: volts for a voltage output, amperes for a
-        current output. The value is the code fraction times the reference, so
-        the top code reaches the reference itself.
+        current output. The value is `lower_bound` plus the code fraction times
+        `reference - lower_bound`, so code 0 reaches the floor and the top code
+        reaches the reference itself.
 
         :return: Scaled output, or None when the channel has no reference.
         """
         reference = self.reference
         if reference is None:
             return None
-        return self._code_to_fraction(self.value) * reference
+        lower = self.lower_bound
+        level = lower + self._code_to_fraction(self.value) * (reference - lower)
+        return min(max(level, lower), reference)
 
     @output.setter
     def output(self, output: float | None) -> None:
         """
         Set the output from a scaled value.
 
-        The value is clamped into `0..reference` without an error, so a caller
-        asking for slightly more than full scale gets full scale instead of a
-        rejected write.
+        The value is clamped into `lower_bound..reference` without an error, so
+        a caller asking for slightly more than the reference gets the reference
+        instead of a rejected write.
 
         :param output: Output in the channel unit (float).
         :raises TypeError: If `output` is not a real number, is a `bool`, or is
             None.
         :raises ValueError: If `output` is infinite or `NaN`.
-        :raises DACReferenceError: If the channel has no reference.
+        :raises DACReferenceError: If the channel has no reference, or its
+            floor is not below the reference.
         """
         reference = self.reference
         if reference is None:
@@ -167,9 +198,16 @@ class DACChannel:
                 f"Channel {self.index} has no reference configured; "
                 "set the device reference or a channel override first"
             )
+        lower = self.lower_bound
+        span = reference - lower
+        if span <= 0:
+            raise DACReferenceError(
+                f"Channel {self.index} has lower_bound {lower!r} "
+                f"not below reference {reference!r}"
+            )
         # None must reach check_number, which is what rejects it with TypeError.
-        value = clamp(check_number(cast(float, output)), 0.0, reference)
-        self.value = self._fraction_to_code(value / reference)
+        level = clamp(check_number(cast(float, output)), lower, reference)
+        self.value = self._fraction_to_code((level - lower) / span)
 
     def _check_code(self, code: int) -> int:
         """
@@ -247,12 +285,12 @@ class VoltageChannel(DACChannel):
 
     @property
     def v_ref(self) -> float | None:
-        """Reference voltage this channel scales by."""
+        """Upper bound this channel maps the top code to."""
         return self.reference
 
     @v_ref.setter
     def v_ref(self, v_ref: float | None) -> None:
-        """Set a per-channel reference voltage, an alias of `reference_override`."""
+        """Set a per-channel upper bound, an alias of `reference_override`."""
         self.reference_override = v_ref
 
 
@@ -273,12 +311,12 @@ class CurrentChannel(DACChannel):
 
     @property
     def i_full_scale(self) -> float | None:
-        """Full-scale current in amperes this channel scales by."""
+        """Upper bound this channel maps the top code to, in amperes."""
         return self.reference
 
     @i_full_scale.setter
     def i_full_scale(self, i_full_scale: float | None) -> None:
-        """Set a per-channel full-scale current, an alias of `reference_override`."""
+        """Set a per-channel upper bound, an alias of `reference_override`."""
         self.reference_override = i_full_scale
 
 
@@ -286,9 +324,9 @@ class DividerChannel(VoltageChannel):
     """
     Voltage output of a resistor divider with one terminal grounded.
 
-    Grounding B makes the output rise from 0 V at code 0 to the reference at
-    full code; grounding A mirrors that curve, so the output falls from the
-    reference at code 0 to 0 V at full code.
+    Grounding B makes the output rise from the lower bound at code 0 to the
+    reference at full code; grounding A mirrors that curve, so the output falls
+    from the reference at code 0 to the lower bound at full code.
     """
 
     def __init__(self, dac: "DAC", index: int, *, grounded: str) -> None:
@@ -329,8 +367,11 @@ class GainChannel:
     A building block, not for direct instantiation: mix it in ahead of a
     channel class and it passes construction on through `super()`.
     `reference_override` (which `v_ref` writes) is the unscaled reference,
-    while `reference` is the effective full scale after gain, so changing gain
+    while `reference` is the effective upper bound after gain, so changing gain
     moves `reference`, `output`, and the clamp bound but never the code.
+
+    Gain scales the upper bound only, leaving `lower_bound` where it is, so
+    combining a gain channel with a non-zero floor is not a supported span.
     """
 
     _GAINS: ClassVar[tuple[int, ...]] = (1, 2)
@@ -363,7 +404,7 @@ class GainChannel:
 
     @property
     def reference(self) -> float | None:
-        """Effective full scale: the unscaled reference times the gain."""
+        """Effective upper bound: the unscaled reference times the gain."""
         # The next class in the bases is the channel this mixin augments.
         base = cast(DACChannel, super()).reference
         return None if base is None else base * self._gain

@@ -7,11 +7,14 @@ transport-backed DAC device and channel objects over `scietex.hal.spi`.
 The 0.1.0 release ships the Microchip MCP4xx1 dual digital potentiometers,
 hardware-tested as grounded resistor dividers driven over a plain SPI
 transport. The 0.2.0 release adds voltage-output SPI DACs implemented from the
-manufacturer datasheets.
+manufacturer datasheets. The 0.3.0 release adds current-output parts (AD420,
+AD5410, AD5420) and an affine output model that can start at a non-zero floor.
 
-The abstraction is unit-neutral: the device reference is a full scale in volts
-for a voltage device and in amperes for a current device, and a channel may
-override it. Scaled outputs stay `None` while no reference is configured.
+The abstraction is unit-neutral: the device reference is the **upper** bound an
+output maps to, in volts for a voltage device and in amperes for a current
+device, and a channel may override it. A device whose span does not start at
+zero declares a floor instead; the reference is never the span width. Scaled
+outputs stay `None` while no reference is configured.
 
 ## Parts
 
@@ -49,21 +52,40 @@ volatile parts.
 | AD7390 | 1 | 12 | external VREF | 0 | needs LD strobe, LD idles high |
 | AD7391 | 1 | 10 | external VREF | 0 | same |
 
+### Current-output DACs (0.3.0, datasheet-derived)
+
+| Part | Channels | Resolution | Ranges | SPI mode | Notes |
+| --- | --- | --- | --- | --- | --- |
+| AD420 | 1 | 16 | 0–5 V, 4–20 mA, 0–20 mA, 0–24 mA (RANGE SELECT pins) | 0 | write-only, needs LATCH strobe; other voltage ranges need an external buffer and are not modelled |
+| AD5410 | 1 | 12 | 4–20, 0–20, 0–24 mA (control register) | 0 | readable over SDO, output disabled at power-on |
+| AD5420 | 1 | 16 | same | 0 | same |
+
 ### Release notes
+
+**0.3.0** adds the current-output parts AD420, AD5410, and AD5420; the affine
+`lower_bound` output model (backward compatible — the floor defaults to `0.0`);
+`configure`/`enable_output`/`disable_output`/`reset` and SDO readback with
+status and control decoding on the AD54x0 parts; and `GpiozeroRisingStrobe` for
+the AD420 LATCH line. The 0.2.0 parts are unchanged.
 
 **0.2.0** adds 16 voltage-output SPI DACs, all datasheet-derived: write-only
 caching, per-channel references, `gain`/`buffered`/`power_down` channel
-attributes, and load-strobe support for the DAC8512 and AD739x. Current-output
-parts (AD420, AD5410/AD5420) are planned for 0.3.0 and are **not** in this
-release.
+attributes, and load-strobe support for the DAC8512 and AD739x.
 
-> **Honesty note: 0.2.0 is not silicon-validated.**
+> **Honesty note: 0.2.0 and 0.3.0 are not silicon-validated.**
 >
-> The 0.2.0 parts are implemented from manufacturer datasheets and are **not**
-> validated on silicon — no test hardware was available. Only the MCP4251
-> potentiometer path is hardware-tested. A wrong bit layout would produce wrong
-> output values rather than a clean error. Bug reports against real hardware
-> are welcome.
+> The 0.2.0 and 0.3.0 parts are implemented from manufacturer datasheets and are
+> **not** validated on silicon — no test hardware was available. Only the
+> MCP4251 potentiometer path is hardware-tested. A wrong bit layout would produce
+> wrong output values rather than a clean error. Bug reports against real
+> hardware are welcome.
+>
+> The current-output parts are not silicon-validated in a stricter sense. The
+> AD420 has **no readback at all**: it can only be checked with an external
+> ammeter on the loop. The AD5410/AD5420 do have SDO readback, but the byte
+> order of the answer has never been verified on hardware; the readback path is
+> the first thing to check on a bench, because a wrong byte order silently
+> returns plausible but wrong codes.
 
 ## Install
 
@@ -119,13 +141,14 @@ Constructor keywords:
 
 | Keyword | Meaning |
 | --- | --- |
-| `reference` | Full-scale voltage in volts, or omitted while unknown |
+| `reference` | Upper bound in volts or amperes, or omitted while unknown |
 | `reference=sequence` | Per-channel references on the dual parts that have one VREF per channel |
-| `channels` | Channels to expose, 1..2; omitted uses both |
+| `channels` | Channels to expose, 1..2 on dual parts; omitted uses the geometry (AD54x0 accepts only 1; AD420 has no such keyword) |
+| `range` | AD420 only: declared range/wiring, `"0-5V"`, `"4-20mA"`, `"0-20mA"`, `"0-24mA"` |
 | `gain` | Gain factor 1 or 2, applied to every channel (MCP48xx, MCP49xx) |
 | `buffered` | Reference-input buffer, applied to every channel (MCP49xx, AD53xx) |
 | `power_down` | Power-down mode, applied to every channel (see below) |
-| `strobe` / `load_pin` | Load line for the strobed parts (see [Strobed parts](#strobed-parts)) |
+| `strobe` / `load_pin` / `latch_pin` | Load line for the strobed parts (see [Strobed parts](#strobed-parts)) |
 | `transport` (alias `spi`) | Any object with `transfer(tx)` and `close()` |
 | `port`, `device` | spidev bus and chip select |
 | `clock_pin`, `mosi_pin`, `miso_pin`, `select_pin` | gpiozero pin wiring |
@@ -144,38 +167,39 @@ Passing either keyword raises `TypeError`.
 
 ## Channel API
 
-`channel.value` is the raw code. `channel.output` scales that code by the
-reference, and `channel.unit` is the physical quantity, `"V"` for every part in
-this package. `channel.voltage` is an alias of `output` on a voltage channel.
-
-```
-output = code / max_code * reference
-```
+`channel.value` is the raw code. `channel.output` maps that code onto the span
+from `lower_bound` to `reference`, and `channel.unit` is the physical quantity:
+`"V"` for a voltage channel and `"A"` for a current channel. `channel.voltage`
+aliases `output` on a voltage channel; `channel.current` aliases it on a current
+channel.
 
 The code range is `0..max_code`: `127` on a 7-bit part, `255` on an 8-bit part,
-`4095` on a 12-bit part, and `65535` on a 16-bit part. This is the ideal full
-scale; rounding to a code can make the reported output up to 1 LSB optimistic.
+`4095` on a 12-bit part, and `65535` on a 16-bit part. The scaling itself is
+affine and described in [Affine output scaling](#affine-output-scaling).
 
-On the readable potentiometers `value` is a live read: every access is a new bus
-transaction, nothing is cached. The 0.2.0 voltage DACs are all write-only and
-are described next.
+On the readable parts `value` is a live read: every access is a new bus
+transaction, nothing is cached. The write-only parts are all of the 0.2.0
+voltage DACs and the AD420; they are described next.
 
-The setter clamps instead of rejecting: an output below zero becomes the bottom
-of the scale (code 0 when grounded B) and an output above the reference becomes
-the top code. Setting `output` while no reference is configured raises
-`DACReferenceError`.
+The output setter clamps instead of rejecting: a value below the floor becomes
+the floor and a value above the reference becomes the reference. Setting
+`output` while no reference is configured raises `DACReferenceError`.
 
 ### Write-only semantics
 
-Every 0.2.0 part is write-only. `channel.value` returns the code cached from the
-last successful write, starting at `0` after construction to match the power-on
-register; no bus read happens. `channel.readback()` raises `DACReadbackError`,
-and `dac.readable` (as well as `channel.readable`) is `False`.
+The 0.2.0 voltage parts and the AD420 are write-only. `channel.value` returns the
+code cached from the last successful write, starting at `0` after construction
+to match the power-on register; no bus read happens. `channel.readback()` raises
+`DACReadbackError`, and `dac.readable` (as well as `channel.readable`) is
+`False`.
 
 A write-only device cannot verify what the chip actually latched, so the cached
 code is the library's record of the last frame it sent, not a measurement. A
 single write is one bus transfer, and `write_all()` is one transfer per channel
 — no read-back follows either call.
+
+The AD5410/AD5420 are readable over SDO; their two-transaction readback is
+covered in [AD5410 and AD5420](#ad5410-and-ad5420).
 
 `device.channels` is a tuple in index order and `channel(n)` raises `IndexError`
 outside the range. A part built with `channels=1` exposes channel 0 only.
@@ -187,13 +211,42 @@ On the potentiometers, `grounded="B"` makes the output rise with the code: code
 0 is the reference and the top code is 0 V. The raw `value` is the same under
 either wiring; only the scaled `output` changes direction.
 
+## Affine output scaling
+
+Every channel maps a raw code onto the span between a floor and an upper bound:
+
+```
+output = lower_bound + (code / max_code) * (reference - lower_bound)
+```
+
+`lower_bound` defaults to `0.0`, which reduces exactly to the 0.2.0 formula
+`code / max_code * reference`. `reference` is the **upper** bound the top code
+maps to; `lower_bound` is the **floor** code 0 maps to. `reference_override`,
+`v_ref`, and `i_full_scale` all alias that upper bound, never the span width.
+
+For a 4–20 mA range, `reference == 0.020` and `lower_bound == 0.004`, so code 0
+maps to 4 mA and code `max_code` maps to 20 mA. The span is 16 mA wide while
+`i_full_scale` still reads `0.020`, because it names the top of the range, not
+its width.
+
+The setter clamps the requested value into `[lower_bound, reference]` instead of
+rejecting it. A channel whose floor is not below its reference cannot map a value
+and raises `DACReferenceError`. This is the ideal full scale; rounding to a code
+can make the reported output up to 1 LSB optimistic.
+
 ## Reference and span
 
-`device.reference` (alias `device.v_ref`) is the device's reference, unscaled.
-`channel.reference_override` (alias `channel.v_ref` on a voltage channel) is the
-per-channel reference that wins over the device default.
+`device.reference` (alias `device.v_ref`) is the device's upper bound, unscaled —
+never the span width, even when the span starts at a non-zero floor.
+`channel.reference_override` (alias `channel.v_ref` on a voltage channel and
+`channel.i_full_scale` on a current channel) is the per-channel upper bound that
+wins over the device default.
 
-`channel.reference` is the **effective full scale after gain**, and `output`
+The floor is separate: `channel.lower_bound` is the output code 0 maps to. It is
+`0.0` unless the device or the selected range sets it, as the 4–20 mA ranges do
+(`0.004`). See [Affine output scaling](#affine-output-scaling).
+
+`channel.reference` is the **effective upper bound after gain**, and `output`
 always uses it. So on an MCP48xx channel at gain 2, `channel.reference` reads
 `4.096`, and `channel.value = 4095` gives `output == 4.096`.
 
@@ -232,18 +285,142 @@ Power-down field widths:
 
 The DAC8512 and AD739x have no power-down field in this package.
 
+These are the 0.2.0 voltage parts' in-frame configuration. The AD5410/AD5420 use
+a **separate** control register written by `configure()` instead of bits in the
+data word, so `gain`, `buffered`, and `power_down` do not apply to them. The AD420
+has no software-configurable bits at all: its range, CLEAR, and FAULT are pins.
+
+## AD420
+
+The AD420 is a single 16-bit converter with a fixed internal 5 V reference. It
+takes a plain 16-bit word, MSB first, with no control bits. `range=` does not
+configure anything; it declares which RANGE SELECT strap the board is wired for
+and selects the channel class and scaling:
+
+| `range=` | Channel | Unit | `reference` | `lower_bound` |
+| --- | --- | --- | --- | --- |
+| `"0-5V"` | voltage | V | 5.0 | 0.0 |
+| `"4-20mA"` | current | A | 0.020 | 0.004 |
+| `"0-20mA"` | current | A | 0.020 | 0.0 |
+| `"0-24mA"` | current | A | 0.024 | 0.0 |
+
+`"4-20mA"` is the default.
+
+**RANGE SELECT is a hardware strap.** The library neither drives nor reads those
+pins, so `range=` only declares the wiring; a wrong declaration silently
+mislabels every output. A 0–20 mA board declared as 4–20 mA reports a floor 4 mA
+too high and a span 4 mA too narrow, while the code and the current the part
+actually sources are unchanged — nothing alarms, only the scaling lies. Other
+voltage ranges (bipolar, 0–10 V) need an external buffer amplifier and are not
+modelled.
+
+**LATCH idles low and latches on the rising edge.** That is the opposite
+polarity of the DAC8512/AD739x `LD` load strobe, which idles high and pulses low;
+wiring one as the other silently drops frames. Pass `latch_pin=` to build a
+`GpiozeroRisingStrobe`, or pass a `RisingLoadStrobe` as `strobe=`. Exactly one
+of the two is required: passing neither raises `DACStrobeError`, passing both
+raises `ValueError`.
+
+CLEAR and FAULT are hardware pins the library does not touch, so neither is
+modelled. The part is write-only: DATA OUT only repeats the frame to the next
+device in a daisy chain, so `channel.value` is the code cached from the last
+successful write and `channel.readback()` raises `DACReadbackError`.
+
+## AD5410 and AD5420
+
+Single-channel current-output parts sharing one register set: the AD5410 is
+12-bit and the AD5420 is 16-bit, with the same 4–20/0–20/0–24 mA ranges. Both
+run in SPI mode 0 and source their output through the control register.
+
+**Construction is silent.** The constructor opens the bus but sends nothing:
+`reference` is `None`, `.output` is `None`, and the chip's output stays disabled
+until `configure()` selects a range and/or `enable_output()` sets OUTEN.
+
+`configure(*, range="4-20mA", slew=False, sr_clock=0, sr_step=0, rext=False,
+dcen=False, force=False)` writes the control register in one 24-bit frame. It is
+idempotent: identical parameters issue zero transfers unless `force=True`
+re-sends the word. Changing the range updates `reference` and `lower_bound`
+immediately without touching the data register, and it keeps the current
+output-enable state.
+
+`enable_output()` and `disable_output()` drive OUTEN, which is preserved across
+range changes. A code write while the output is disabled raises
+`DACOutputDisabledError` before any bus traffic, because the register would
+change but the loop would not.
+
+`reset()` sends the reset frame (`0x560001`) and clears the cached control state:
+`reference` returns to `None` and the floor to `0.0`. The hardware RESET pin has
+the same effect but is invisible to the object, so the cache then describes a
+state the device no longer holds; `configure(..., force=True)` and the
+`force=True` on `enable_output()`/`disable_output()` re-send their word.
+
+**Readback costs two 24-bit transactions.** A register read is a read-request
+frame followed by a NOP that clocks the answer out:
+
+```
+read status  : 02 00 00  ->  then 00 00 00
+read data    : 02 00 01  ->  then 00 00 00
+read control : 02 00 02  ->  then 00 00 00
+```
+
+`.value` performs both transactions on every access — nothing is cached.
+`read_status()` returns `AD54x0Status(iout_fault, slew_active, overtemp)` and
+`read_control()` returns `AD54x0Control(range_code, rext, outen, sr_clock,
+sr_step, sr_enabled, dcen, raw)`.
+
+Data alignment follows the resolution: the AD5410 is 12-bit left-aligned in
+DB15–DB4, so the low nibble of a data frame is always zero; the AD5420 fills all
+16 bits.
+
+Range codes:
+
+| `range=` | Code |
+| --- | --- |
+| `"4-20mA"` | `0b101` |
+| `"0-20mA"` | `0b110` |
+| `"0-24mA"` | `0b111` |
+
+Control register bits, within the 16-bit control field after the `0x55`
+address:
+
+| Bits | Field | Meaning |
+| --- | --- | --- |
+| DB15–DB14 | — | unused |
+| DB13 | REXT | select an external 15 kΩ current-setting resistor |
+| DB12 | OUTEN | enable the current output |
+| DB11–DB8 | SR_CLOCK | slew clock divider, `0..15` |
+| DB7–DB5 | SR_STEP | slew step size, `0..7` |
+| DB4 | SR_EN | enable the slew-rate controller |
+| DB3 | DCEN | enable the daisy-chain output |
+| DB2–DB0 | RANGE | range code |
+
+`.output` on these parts is register intent only; while OUTEN is 0 it is not
+evidence of the current actually flowing in the loop.
+
 ## Strobed parts
 
-`DAC8512`, `AD7390`, and `AD7391` need the `LD` load line. It idles **high** and
-is pulsed low then high for each write to latch the frame. The constructor takes
-exactly one of:
+Some parts latch a clocked frame with a load line. There are two polarities, and
+they are not interchangeable: a reversed strobe still transfers every frame but
+latches nothing, so the register silently keeps its previous code.
 
-- `strobe=` — a `LoadStrobe` with `pulse()` and `close()`;
+| Part | Signal | Idle level | Active edge | Keyword |
+| --- | --- | --- | --- | --- |
+| DAC8512, AD7390, AD7391 | `LD` | high | pulses low then high | `strobe=` / `load_pin=` |
+| AD420 | `LATCH` | low | pulses high then low | `strobe=` / `latch_pin=` |
+
+The `LD` parts take exactly one of:
+
+- `strobe=` — a `LoadStrobe` with `pulse()` and `close()` (`GpiozeroStrobe`
+  drives a pin);
 - `load_pin=` — a gpiozero pin number; the constructor builds a `GpiozeroStrobe`.
 
-Passing neither raises `DACStrobeError`; passing both raises `ValueError`. The
-GPIO version is `GpiozeroStrobe(pin, pulse_width=1e-5)`, where the default low
-time is 10 microseconds:
+The AD420 takes a rising-edge strobe instead: `strobe=` may be a
+`RisingLoadStrobe`, or `latch_pin=` builds a `GpiozeroRisingStrobe`.
+
+For either family, passing neither raises `DACStrobeError`; passing both raises
+`ValueError`. The GPIO versions default to a 10 microsecond pulse:
+`GpiozeroStrobe(pin, pulse_width=1e-5)` and
+`GpiozeroRisingStrobe(pin, pulse_width=1e-5)`.
 
 ```python
 from scietex.hal.dac import DAC8512
@@ -252,13 +429,20 @@ with DAC8512(load_pin=17) as dac:
     dac.channel(0).output = 2.0
 ```
 
+```python
+from scietex.hal.dac import AD420
+
+with AD420(range="4-20mA", latch_pin=17) as dac:
+    dac.channel(0).current = 0.012
+```
+
 ## Wiring notes
 
 - The `LDAC` input must be tied low on MCP48xx/MCP49xx/AD53xx unless the caller
   drives it; the package does not. A floating or high LDAC accepts the input
   word but does not latch the DAC register.
-- The SPI mode is per the part table: mode 0 for MCP48xx, MCP49xx, DAC8512, and
-  AD739x; mode 1 for DAC85xx, DAC121S101, and AD53xx.
+- The SPI mode is per the part table: mode 0 for MCP48xx, MCP49xx, DAC8512,
+  AD739x, AD420, AD5410, and AD5420; mode 1 for DAC85xx, DAC121S101, and AD53xx.
 - The gpiozero pin backend is SPI mode 0 only. A mode-1 part must be constructed
   with `transport=`/`spi=` built from `SpiDevTransport(..., mode=1)` instead of
   the pin keywords.
@@ -290,16 +474,19 @@ A single write to a readable potentiometer is two transactions: the wiper
 command followed by a register read-back, so the value a channel reports
 afterwards is what the device returned, not what the caller submitted.
 `write_all` validates the whole sequence before the first transaction, so a
-rejected code cannot leave the device partially updated.
+rejected code cannot leave the device partially updated. On the AD54x0 parts a
+register read is likewise two transactions (request plus NOP), described in
+[AD5410 and AD5420](#ad5410-and-ad5420).
 
 ## Errors
 
 ```
 DACError
-├── DACReferenceError   (ValueError)  output requested or set with no reference
-├── DACCodeError        (ValueError)  raw code outside 0..max_code
-├── DACReadbackError    (RuntimeError)  readback requested from a write-only part
-└── DACStrobeError      (RuntimeError)  strobed part used without a load strobe
+├── DACReferenceError       (ValueError)  output requested or set with no reference
+├── DACCodeError            (ValueError)  raw code outside 0..max_code
+├── DACReadbackError        (RuntimeError)  readback requested from a write-only part
+├── DACStrobeError          (RuntimeError)  strobed part used without a load strobe
+└── DACOutputDisabledError  (RuntimeError)  code write while the current output is disabled
 ```
 
 `TransportError` and `TransportClosed` come from `scietex.hal.spi` and mean the
@@ -314,10 +501,12 @@ pytest                 # unit tests, no hardware needed
 RUN_HARDWARE_TESTS=1 pytest tests/test_hardware.py
 ```
 
-The current suite reports **612 passed, 1 skipped**. The unit tests drive a
-scripted transport and never open a real bus. The skip is the hardware `MCP4251`
-test gated by `RUN_HARDWARE_TESTS=1`, which also needs a device at
-`/dev/spidev0.1`; CI never enables it. No 0.2.0 part has a hardware test.
+The current suite reports **781 passed, 3 skipped**. The unit tests drive a
+scripted transport and never open a real bus. All three skips are hardware tests
+gated behind `RUN_HARDWARE_TESTS=1`: the `MCP4251` round-trip plus the new
+`AD5420` readback and `AD420` write tests, each also needing a device at
+`/dev/spidev0.1`. CI never enables them. No 0.2.0 part has a hardware test, and
+**no current-output part has been on a bench**.
 
 Other checks:
 

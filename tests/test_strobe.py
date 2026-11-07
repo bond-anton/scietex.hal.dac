@@ -5,10 +5,14 @@ import types
 from typing import Any
 
 import pytest
-from conftest import FakeStrobe, RecordingTransport
+from conftest import FakeRisingStrobe, FakeStrobe, RecordingTransport
 
 import scietex.hal.dac.__strobe as strobe_module
-from scietex.hal.dac.__strobe import GpiozeroStrobe, StrobedBackend
+from scietex.hal.dac.__strobe import (
+    GpiozeroRisingStrobe,
+    GpiozeroStrobe,
+    StrobedBackend,
+)
 
 
 class FakeDigitalOutputDevice:
@@ -164,3 +168,65 @@ def test_a_missing_gpiozero_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> 
     message = str(excinfo.value)
     assert "gpiozero" in message
     assert "scietex.hal.dac[gpiozero]" in message
+
+
+def test_a_rising_strobe_idles_low_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The latch line idles low before the first frame is clocked."""
+    devices = fake_gpiozero(monkeypatch)
+    strobe = GpiozeroRisingStrobe(17)
+    assert devices[0].pin == 17
+    assert devices[0].value is False
+    assert strobe.closed is False
+
+
+def test_a_rising_pulse_drives_high_then_low_for_the_configured_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One pulse is high, a sleep of `pulse_width`, then low."""
+    devices = fake_gpiozero(monkeypatch)
+    sleeps: list[float] = []
+    monkeypatch.setattr(strobe_module.time, "sleep", sleeps.append)
+    strobe = GpiozeroRisingStrobe(17, pulse_width=2e-4)
+    strobe.pulse()
+    assert devices[0].states == [False, True, False]
+    assert sleeps == [pytest.approx(2e-4)]
+    assert devices[0].value is False
+
+
+def test_a_rising_strobe_releases_its_pin_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing releases the pin and repeated calls have no effect."""
+    devices = fake_gpiozero(monkeypatch)
+    strobe = GpiozeroRisingStrobe(17)
+    strobe.close()
+    assert devices[0].closed is True
+    assert strobe.closed is True
+    strobe.close()
+    assert devices[0].close_calls == 1
+
+
+def test_a_missing_gpiozero_names_the_extra_for_a_rising_strobe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rising strobe reports the same extra as the falling one."""
+    monkeypatch.setitem(sys.modules, "gpiozero", None)
+    with pytest.raises(ImportError) as excinfo:
+        GpiozeroRisingStrobe(17)
+    message = str(excinfo.value)
+    assert "gpiozero" in message
+    assert "scietex.hal.dac[gpiozero]" in message
+
+
+def test_the_backend_accepts_a_rising_strobe() -> None:
+    """Either strobe polarity fits the backend, which only forwards transfers."""
+    log: list[str] = []
+    transport = RecordingTransport(log=log)
+    strobe = FakeRisingStrobe(log=log)
+    wrapper = StrobedBackend(transport, strobe)
+    assert wrapper.strobe is strobe
+    assert wrapper.transfer([1, 2]) == []
+    assert transport.requests == [[1, 2]]
+    assert log == ["transfer"]

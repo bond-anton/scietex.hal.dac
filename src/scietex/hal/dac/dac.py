@@ -17,10 +17,12 @@ class DAC:
     bus, and its channels are built once from the class-level geometry.
     `channels` holds them in index order and never changes.
 
-    `reference` is unit-neutral: it is the full scale the outputs map to, in
+    `reference` is unit-neutral: it is the upper bound the outputs map to, in
     volts for a voltage device and in amperes for a current device. While it is
     None the scaled `output` of every channel is None, because the library will
-    not guess a full scale.
+    not guess a full scale. A device whose span does not start at zero sets
+    `_LOWER_BOUND`, the floor its channels inherit; `reference` stays the top of
+    the span, never its width.
 
     A device that cannot report its registers back sets `_READABLE` to False;
     its channels then serve the code cached from the last write instead of
@@ -41,6 +43,9 @@ class DAC:
     _FIXED_REFERENCE: float | None = None
     """Full scale fixed by the device, in its own unit, or None."""
 
+    _LOWER_BOUND: float = 0.0
+    """Span floor every channel inherits, in the device unit."""
+
     def __init__(
         self,
         *,
@@ -55,8 +60,8 @@ class DAC:
 
         :param backend: Object the device delegates bus access and lifecycle to;
             it needs `close()` and may expose `transport`, `spi`, and `closed`.
-        :param reference: Full-scale value the channels scale by, or None while
-            it is unknown (float | None).
+        :param reference: Upper bound the channels scale to, or None while it is
+            unknown (float | None).
         :param channel_count: Number of channels to expose, defaults to the
             device geometry (int | None).
         :param label: Logger name, defaults to the class name (str).
@@ -88,15 +93,15 @@ class DAC:
 
     @property
     def reference(self) -> float | None:
-        """Full scale the channels map to, or None when it is unknown."""
+        """Upper bound the channels map the top code to, or None when unknown."""
         return self._reference
 
     @reference.setter
     def reference(self, reference: float | None) -> None:
         """
-        Set the full scale used by the channel `output` properties.
+        Set the upper bound used by the channel `output` properties.
 
-        :param reference: Positive full scale, or None (float | None).
+        :param reference: Positive upper bound, or None (float | None).
         :raises TypeError: If `reference` is not a real number, or is a `bool`.
         :raises ValueError: If `reference` is zero, negative, infinite, or
             `NaN`, or conflicts with a fixed full scale.
@@ -110,12 +115,12 @@ class DAC:
 
     @property
     def v_ref(self) -> float | None:
-        """Alias of `reference`, the conventional name on a voltage device."""
+        """Alias of `reference`; names the upper bound on a voltage device."""
         return self.reference
 
     @v_ref.setter
     def v_ref(self, v_ref: float | None) -> None:
-        """Set the full scale, an alias of `reference`."""
+        """Set the upper bound, an alias of `reference`."""
         self.reference = v_ref
 
     @property

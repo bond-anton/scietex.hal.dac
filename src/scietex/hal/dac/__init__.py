@@ -1,6 +1,8 @@
 """Digital-to-analog converters."""
 
 from .ad53xx import AD5302, AD5312, AD5322
+from .ad54x0 import AD5410, AD5420, AD54x0Control, AD54x0Status
+from .ad420 import AD420
 from .ad739x import AD7390, AD7391
 from .channel import (
     CurrentChannel,
@@ -16,6 +18,7 @@ from .dac8512 import DAC8512
 from .errors import (
     DACCodeError,
     DACError,
+    DACOutputDisabledError,
     DACReadbackError,
     DACReferenceError,
     DACStrobeError,
@@ -38,6 +41,7 @@ __all__ = [
     "DACCodeError",
     "DACReadbackError",
     "DACStrobeError",
+    "DACOutputDisabledError",
     "MCP4231",
     "MCP4241",
     "MCP4251",
@@ -58,4 +62,9 @@ __all__ = [
     "DAC8512",
     "AD7390",
     "AD7391",
+    "AD5410",
+    "AD5420",
+    "AD420",
+    "AD54x0Status",
+    "AD54x0Control",
 ]

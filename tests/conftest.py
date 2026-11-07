@@ -93,6 +93,10 @@ class FakeStrobe:
         self.closed = True
 
 
+class FakeRisingStrobe(FakeStrobe):
+    """Rising-edge load-strobe stand-in; records exactly like `FakeStrobe`."""
+
+
 class MemoryBackend:
     """Transport-shaped stand-in: records requests and tracks its closed state."""
 

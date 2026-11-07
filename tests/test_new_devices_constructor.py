@@ -4,13 +4,17 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from conftest import FakeStrobe, RecordingTransport, fake
+from conftest import FakeRisingStrobe, FakeStrobe, RecordingTransport, fake
 
+import scietex.hal.dac as dac_package
 import scietex.hal.dac.__transport as transport_module
 from scietex.hal.dac import (
+    AD420,
     AD5302,
     AD5312,
     AD5322,
+    AD5410,
+    AD5420,
     AD7390,
     AD7391,
     DAC,
@@ -29,6 +33,7 @@ from scietex.hal.dac import (
     MCP4902,
     MCP4912,
     MCP4922,
+    DACOutputDisabledError,
     DACReadbackError,
 )
 
@@ -44,6 +49,13 @@ class Spec:
     fixed: float | None
     mode: int
     strobed: bool = False
+    rising: bool = False
+    readable: bool = False
+    unit: str = "V"
+    lower: float = 0.0
+    uses_range: str | None = None
+    accepts_channels: bool = True
+    accepts_reference: bool = True
 
 
 SPECS = [
@@ -63,9 +75,33 @@ SPECS = [
     Spec(DAC8512, 1, 12, 4095, 4.095, 0, strobed=True),
     Spec(AD7390, 1, 12, 4095, None, 0, strobed=True),
     Spec(AD7391, 1, 10, 1023, None, 0, strobed=True),
+    Spec(AD5410, 1, 12, 4095, None, 0, readable=True, unit="A"),
+    Spec(AD5420, 1, 16, 65535, None, 0, readable=True, unit="A"),
+    Spec(
+        AD420,
+        1,
+        16,
+        65535,
+        0.020,
+        0,
+        strobed=True,
+        rising=True,
+        unit="A",
+        lower=0.004,
+        uses_range="4-20mA",
+        accepts_channels=False,
+        accepts_reference=False,
+    ),
 ]
 
-FIXED_SPECS = [spec for spec in SPECS if spec.fixed is not None]
+FIXED_SPECS = [
+    spec for spec in SPECS if spec.fixed is not None and spec.accepts_reference
+]
+
+READABLE_SPECS = [spec for spec in SPECS if spec.readable]
+WRITE_ONLY_SPECS = [spec for spec in SPECS if not spec.readable]
+CHANNEL_SPECS = [spec for spec in SPECS if spec.accepts_channels]
+REFERENCE_SPECS = [spec for spec in SPECS if spec.accepts_reference]
 
 MODE_ONE_PARTS = [DAC8531, DAC121S101, AD5322]
 
@@ -94,8 +130,11 @@ def build(spec: Spec, **kwargs: Any) -> tuple[DAC, Bus, FakeStrobe | None]:
         transport = Bus()
     strobe = kwargs.pop("strobe", None)
     if spec.strobed:
-        strobe = FakeStrobe() if strobe is None else strobe
+        if strobe is None:
+            strobe = FakeRisingStrobe() if spec.rising else FakeStrobe()
         kwargs["strobe"] = strobe
+    if spec.uses_range is not None:
+        kwargs.setdefault("range", spec.uses_range)
     return spec.part(transport=transport, **kwargs), transport, strobe
 
 
@@ -118,14 +157,16 @@ def test_attributes_match_the_matrix(spec: Spec) -> None:
     assert len(dac.channels) == spec.channels
     assert dac.resolution == spec.resolution
     assert dac.max_code == spec.max_code
-    assert dac.readable is False
-    assert all(channel.readable is False for channel in dac.channels)
+    assert dac.readable is spec.readable
+    assert all(channel.readable is spec.readable for channel in dac.channels)
     assert isinstance(dac.channels, tuple)
     assert len({id(channel) for channel in dac.channels}) == spec.channels
     if spec.fixed is None:
         assert dac.reference is None
     else:
         assert dac.reference == pytest.approx(spec.fixed)
+    assert str(dac.channel(0).unit) == spec.unit
+    assert dac.channel(0).lower_bound == pytest.approx(spec.lower)
     assert spec.mode == spec.part._SPI_MODE
 
 
@@ -186,7 +227,7 @@ def test_context_manager_closes_the_device_and_the_strobe(spec: Spec) -> None:
         assert strobe.closed is True
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=ids)
+@pytest.mark.parametrize("spec", CHANNEL_SPECS, ids=ids)
 def test_channel_count_out_of_range_is_rejected_before_any_transfer(
     spec: Spec,
 ) -> None:
@@ -198,7 +239,7 @@ def test_channel_count_out_of_range_is_rejected_before_any_transfer(
         assert transport.requests == []
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=ids)
+@pytest.mark.parametrize("spec", REFERENCE_SPECS, ids=ids)
 def test_wrong_type_reference_is_rejected_before_any_transfer(spec: Spec) -> None:
     """A string is not a full scale, whatever the family."""
     transport = Bus()
@@ -223,7 +264,9 @@ def test_conflicting_fixed_reference_is_rejected_before_any_transfer(
 def test_empty_label_closes_the_transport_exactly_once(spec: Spec) -> None:
     """A late rejection releases every resource the constructor opened."""
     transport = Bus()
-    strobe = FakeStrobe() if spec.strobed else None
+    strobe = None
+    if spec.strobed:
+        strobe = FakeRisingStrobe() if spec.rising else FakeStrobe()
     with pytest.raises(ValueError):
         build(spec, transport=transport, strobe=strobe, label="")
     assert transport.close_calls == 1
@@ -278,9 +321,9 @@ def test_mode_zero_parts_build_the_gpiozero_backend(
     assert forwarded["clock_pin"] == 11
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=ids)
+@pytest.mark.parametrize("spec", WRITE_ONLY_SPECS, ids=ids)
 def test_write_only_channels_cache_and_refuse_readback(spec: Spec) -> None:
-    """Every 0.2.0 part is write-only and serves the cached power-up code."""
+    """A write-only part serves the cached power-up code and refuses a read."""
     dac, transport, strobe = build(spec)
     channel = dac.channel(0)
     assert isinstance(channel.value, int)
@@ -292,6 +335,109 @@ def test_write_only_channels_cache_and_refuse_readback(spec: Spec) -> None:
     assert transport.requests == []
     if strobe is not None:
         assert strobe.pulse_calls == []
+
+
+@pytest.mark.parametrize("spec", READABLE_SPECS, ids=ids)
+def test_readable_channels_read_with_two_request_frames(spec: Spec) -> None:
+    """A readable part asks for the register, then clocks the answer out."""
+    transport = Bus()
+    transport.default = [0x00, 0x00, 0x00]
+    dac, _, _ = build(spec, transport=transport)
+    channel = dac.channel(0)
+    assert channel.value == 0
+    assert transport.requests == [[0x02, 0x00, 0x01], [0x00, 0x00, 0x00]]
+    assert channel.readback() == 0
+    assert len(transport.requests) == 4
+
+
+@pytest.mark.parametrize("part", [AD5410, AD5420], ids=["AD5410", "AD5420"])
+def test_a_data_write_needs_an_enabled_output(part: type[DAC]) -> None:
+    """The disabled output refuses the write; enabling it lets the same one pass."""
+    transport = Bus()
+    dac = part(transport=transport)
+    with pytest.raises(DACOutputDisabledError):
+        dac.channel(0).value = 1
+    assert transport.requests == []
+    dac.enable_output()
+    dac.channel(0).value = 1
+    assert len(transport.requests) == 2
+    assert transport.requests[-1][0] == 0x01
+    dac.close()
+
+
+AD420_RANGES = [
+    ("0-5V", 5.0, 0.0, "V"),
+    ("4-20mA", 0.020, 0.004, "A"),
+    ("0-20mA", 0.020, 0.0, "A"),
+    ("0-24mA", 0.024, 0.0, "A"),
+]
+
+
+@pytest.mark.parametrize(
+    ("range_name", "reference", "lower", "unit"),
+    AD420_RANGES,
+    ids=[row[0] for row in AD420_RANGES],
+)
+def test_ad420_reference_follows_the_declared_range(
+    range_name: str, reference: float, lower: float, unit: str
+) -> None:
+    """The declared wiring, not the constructor, sets the span and the unit."""
+    transport = Bus()
+    dac = AD420(transport=transport, strobe=FakeRisingStrobe(), range=range_name)
+    assert transport.requests == []
+    assert dac.reference == pytest.approx(reference)
+    assert dac.channel(0).lower_bound == pytest.approx(lower)
+    assert str(dac.channel(0).unit) == unit
+    dac.close()
+
+
+EXPORTED = [
+    "__version__",
+    "DAC",
+    "DACChannel",
+    "DACUnit",
+    "VoltageChannel",
+    "CurrentChannel",
+    "DividerChannel",
+    "DACError",
+    "DACReferenceError",
+    "DACCodeError",
+    "DACReadbackError",
+    "DACStrobeError",
+    "DACOutputDisabledError",
+    "MCP4231",
+    "MCP4241",
+    "MCP4251",
+    "MCP4261",
+    "MCP4802",
+    "MCP4812",
+    "MCP4822",
+    "MCP4902",
+    "MCP4912",
+    "MCP4922",
+    "DAC8531",
+    "DAC8551",
+    "DAC8552",
+    "DAC121S101",
+    "AD5302",
+    "AD5312",
+    "AD5322",
+    "DAC8512",
+    "AD7390",
+    "AD7391",
+    "AD5410",
+    "AD5420",
+    "AD420",
+    "AD54x0Status",
+    "AD54x0Control",
+]
+
+
+def test_the_public_surface_is_exactly_the_documented_names() -> None:
+    """A forgotten or accidental export fails as a set and as a sorted list."""
+    assert len(EXPORTED) == 38
+    assert set(dac_package.__all__) == set(EXPORTED)
+    assert sorted(dac_package.__all__) == sorted(EXPORTED)
 
 
 @pytest.mark.parametrize("part", [MCP4231, MCP4241, MCP4251, MCP4261])

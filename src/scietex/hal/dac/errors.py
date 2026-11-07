@@ -19,3 +19,7 @@ class DACReadbackError(DACError, RuntimeError):
 
 class DACStrobeError(DACError, RuntimeError):
     """Raised when a strobed device is used without a load strobe."""
+
+
+class DACOutputDisabledError(DACError, RuntimeError):
+    """Raised when a code write targets a channel whose output is disabled."""
