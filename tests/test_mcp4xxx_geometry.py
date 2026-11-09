@@ -67,7 +67,7 @@ def test_channel_index_outside_the_geometry_raises(
 def test_construction_reads_every_wiper(
     part: type, pot_class: type, bits: int, top_code: int
 ) -> None:
-    """The wrapped part reads both wipers while it is being built."""
+    """The wrapped part reads both wipers, then enables the output."""
     _, transport = build(part)
     assert transport.calls == [
         [0x0C, 0x00],
@@ -75,6 +75,8 @@ def test_construction_reads_every_wiper(
         [0x0C, 0x00],
         [0x1C, 0x00],
         [0x1C, 0x00],
+        [0x41, 0xFF],
+        [0x4C, 0x00],
     ]
 
 

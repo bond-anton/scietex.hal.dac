@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 import scietex.hal.spi.spidev_spi as spidev_spi
-from conftest import RecordingTransport, build, fake, wiper_frame
+from conftest import McpRecordingTransport, build, fake, wiper_frame
 
 from scietex.hal.dac import MCP4251
 
@@ -24,7 +24,9 @@ class _RecordingGpiozeroTransport:
         _RecordingGpiozeroTransport.instances.append(self)
 
     def transfer(self, tx: list[int]) -> list[int]:
-        """Answer with a zero-code wiper frame of the request length."""
+        """Answer TCON frames as connected, wiper frames with a zero code."""
+        if tx and tx[0] in (0x41, 0x4C):
+            return [0xFF, 0xFF]
         return wiper_frame(0)
 
     def close(self) -> None:
@@ -61,9 +63,15 @@ def test_channels_one_builds_a_single_dac_channel() -> None:
 
 
 def test_channels_one_consumes_three_construction_reads() -> None:
-    """The wrapped part still reads channel 0 three times while it is built."""
+    """The wrapped part reads channel 0 three times, then builds the output."""
     _, transport = build(channels=1)
-    assert transport.calls == [[0x0C, 0x00], [0x0C, 0x00], [0x0C, 0x00]]
+    assert transport.calls == [
+        [0x0C, 0x00],
+        [0x0C, 0x00],
+        [0x0C, 0x00],
+        [0x41, 0xFF],
+        [0x4C, 0x00],
+    ]
 
 
 def test_transport_is_forwarded_to_the_part() -> None:
@@ -84,7 +92,7 @@ def test_spi_is_an_alias_for_transport() -> None:
 def test_port_and_device_select_the_spidev_bus() -> None:
     """port maps to the spidev bus number, device to the chip select."""
     with mock.patch.object(spidev_spi, "SpiDevTransport") as constructor:
-        constructor.return_value.transfer.return_value = wiper_frame(0)
+        constructor.return_value.transfer.return_value = [0xFF, 0xFF]
         dac = MCP4251(port=1, device=2)
     constructor.assert_called_once_with(bus=1, device=2)
     assert dac.transport is constructor.return_value
@@ -148,7 +156,7 @@ def test_hidden_pot_keywords_are_rejected(keyword: dict[str, object]) -> None:
 
 def test_an_empty_label_closes_the_part_it_built() -> None:
     """The DAC layer releases the wrapped part when it rejects the label."""
-    transport = RecordingTransport(default=wiper_frame(0))
+    transport = McpRecordingTransport(default=wiper_frame(0))
     with pytest.raises(ValueError):
         MCP4251(transport=transport, label="")
     assert transport.close_calls == 1

@@ -1,15 +1,15 @@
 """Error reporting of the MCP4xxx DAC wrappers."""
 
 import pytest
-from conftest import RecordingTransport, build, wiper_frame
-from scietex.hal.spi import FakeSpiTransport, TransportError
+from conftest import McpFakeTransport, McpRecordingTransport, build, wiper_frame
+from scietex.hal.spi import TransportError
 
 from scietex.hal.dac import MCP4231, MCP4251, DACCodeError
 
 
 def test_transport_error_propagates_from_a_read() -> None:
     """A bus failure is never turned into a code error."""
-    transport = FakeSpiTransport(responses=[wiper_frame(0)] * 5)
+    transport = McpFakeTransport(responses=[wiper_frame(0)] * 5)
     dac, _ = build(transport=transport)
     with pytest.raises(TransportError) as excinfo:
         _ = dac.channel(0).value
@@ -18,7 +18,7 @@ def test_transport_error_propagates_from_a_read() -> None:
 
 def test_transport_error_propagates_from_a_write() -> None:
     """The write command fails before any read-back is attempted."""
-    transport = FakeSpiTransport(responses=[wiper_frame(0)] * 5)
+    transport = McpFakeTransport(responses=[wiper_frame(0)] * 5)
     dac, _ = build(transport=transport)
     with pytest.raises(TransportError):
         dac.channel(0).value = 5
@@ -27,7 +27,7 @@ def test_transport_error_propagates_from_a_write() -> None:
 
 def test_malformed_read_frame_is_a_value_error() -> None:
     """A device answer with broken framing is rejected by the wrapped part."""
-    transport = RecordingTransport(
+    transport = McpRecordingTransport(
         responses=[wiper_frame(0)] * 5,
         default=[0x00, 0x00],
     )

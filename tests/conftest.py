@@ -14,9 +14,47 @@ def wiper_frame(code: int) -> list[int]:
     return [0xFE | ((code >> 8) & 1), code & 0xFF]
 
 
-def fake(*codes: int, default: int = 0) -> FakeSpiTransport:
+#: Write frame of the TCON register: `_W_CMD | _TCON | 0x01`.
+TCON_WRITE = 0x41
+#: Read frame of the TCON register: `_R_CMD | _TCON`.
+TCON_READ = 0x4C
+#: TCON nibble pair that connects A, W, and B on both channels.
+TCON_CONNECTED = 0xFF
+
+
+class McpFakeTransport(FakeSpiTransport):
+    """Scripted bus that also models the MCP4xxx TCON register.
+
+    TCON traffic is answered from `tcon` instead of the response queue, so a
+    test scripts only wiper frames. `echo_tcon=False` answers every TCON read
+    with a disconnected state, which is how a failing write-back is simulated.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        tcon: int = TCON_CONNECTED,
+        echo_tcon: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.tcon = tcon
+        self.echo_tcon = echo_tcon
+
+    def transfer(self, tx: Sequence[int]) -> list[int]:
+        """Answer TCON frames from the modelled register, others from the queue."""
+        frame = list(tx)
+        if frame and frame[0] in (TCON_WRITE, TCON_READ):
+            self.calls.append(frame)
+            if frame[0] == TCON_WRITE:
+                self.tcon = frame[1]
+            return [0xFF, self.tcon if self.echo_tcon else 0x00]
+        return super().transfer(frame)
+
+
+def fake(*codes: int, default: int = 0) -> McpFakeTransport:
     """Transport queuing one read frame per code, then a default frame."""
-    return FakeSpiTransport(
+    return McpFakeTransport(
         responses=[wiper_frame(code) for code in codes],
         default=wiper_frame(default),
     )
@@ -67,6 +105,25 @@ class RecordingTransport:
             f"{type(self).__name__}(requests={len(self.requests)}, "
             f"closed={self.closed})"
         )
+
+
+class McpRecordingTransport(RecordingTransport):
+    """Recording bus that also models the MCP4xxx TCON register."""
+
+    def __init__(self, *args: Any, tcon: int = TCON_CONNECTED, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.tcon = tcon
+
+    def transfer(self, data: Sequence[int]) -> list[int]:
+        """Answer TCON frames from the modelled register, others in order."""
+        frame = list(data)
+        if frame and frame[0] in (TCON_WRITE, TCON_READ):
+            self.log.append("transfer")
+            self.requests.append(frame)
+            if frame[0] == TCON_WRITE:
+                self.tcon = frame[1]
+            return [0xFF, self.tcon]
+        return super().transfer(frame)
 
 
 class FakeStrobe:

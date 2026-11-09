@@ -2,13 +2,13 @@
 
 import pytest
 from BDPotentiometer import DigitalPotentiometerDevice
-from conftest import RecordingTransport, build, wiper_frame
+from conftest import McpRecordingTransport, build, wiper_frame
 from scietex.hal.spi import TransportClosed
 
 from scietex.hal.dac import MCP4251
 
 
-class FailingCloseTransport(RecordingTransport):
+class FailingCloseTransport(McpRecordingTransport):
     """Transport whose `close()` reports a stuck bus after releasing it."""
 
     def close(self) -> None:

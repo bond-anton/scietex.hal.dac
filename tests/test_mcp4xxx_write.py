@@ -1,8 +1,7 @@
 """Frame encoding and read-back of the MCP4xxx DAC wrappers."""
 
 import pytest
-from conftest import build, wiper_frame
-from scietex.hal.spi import FakeSpiTransport
+from conftest import McpFakeTransport, build, wiper_frame
 
 from scietex.hal.dac import (
     MCP4231,
@@ -68,7 +67,7 @@ def test_top_code_write_frame(part: type, top_code: int) -> None:
 
 def test_set_value_reports_the_device_read_back() -> None:
     """A write returns the register value the device reports, not the input."""
-    transport = FakeSpiTransport(
+    transport = McpFakeTransport(
         responses=[wiper_frame(0)] * 5,
         default=wiper_frame(42),
     )

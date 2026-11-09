@@ -9,6 +9,8 @@ hardware-tested as grounded resistor dividers driven over a plain SPI
 transport. The 0.2.0 release adds voltage-output SPI DACs implemented from the
 manufacturer datasheets. The 0.3.0 release adds current-output parts (AD420,
 AD5410, AD5420) and an affine output model that can start at a non-zero floor.
+The 0.4.0 release re-asserts the MCP4xxx terminal connections on every open and
+exposes `enable_output()` / `disable_output()` on those parts.
 
 The abstraction is unit-neutral: the device reference is the **upper** bound an
 output maps to, in volts for a voltage device and in amperes for a current
@@ -30,6 +32,13 @@ outputs stay `None` while no reference is configured.
 The non-volatile parts keep a wiper value across power cycles, but this package
 has no commit path: only the volatile register is written, exactly as on the
 volatile parts.
+
+The terminal-connect (TCON) register is volatile on every part and powers up
+with A, W, and B disconnected, so the wiper register alone does not drive an
+output. Construction asserts the connected state and `output_enabled` reports
+it; `disable_output()` disconnects both wipers (and asserts shutdown), while
+`enable_output(force=True)` re-asserts the state after a pot power cycle. A code
+write while the output is disabled raises `DACOutputDisabledError`.
 
 ### Voltage-output DACs (0.2.0, datasheet-derived)
 
@@ -61,6 +70,13 @@ volatile parts.
 | AD5420 | 1 | 16 | same | 0 | same |
 
 ### Release notes
+
+**0.4.0** makes the MCP4xxx potentiometers assert their terminal-connect (TCON)
+state on every open, because the register is volatile and powers up
+disconnected — a power cycle previously left the wiper high-impedance while the
+wiper register still read back the written code. It also adds
+`output_enabled`, `enable_output()`, and `disable_output()` to those parts, with
+a `DACOutputDisabledError` guard on code writes. Everything else is unchanged.
 
 **0.3.0** adds the current-output parts AD420, AD5410, and AD5420; the affine
 `lower_bound` output model (backward compatible — the floor defaults to `0.0`);
